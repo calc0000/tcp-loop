@@ -1,0 +1,8 @@
+[package]
+name = "tcp-loop"
+version = "0.1.0"
+authors = ["ewf"]
+
+[dependencies]
+mio = "*"
+log = "*"
