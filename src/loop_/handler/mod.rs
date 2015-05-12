@@ -2,16 +2,19 @@ use std::collections::HashMap;
 use std::{convert, io, net};
 use std::sync::mpsc::Sender;
 use mio;
-use mio::tcp::{TcpListener, TcpStream};
+use mio::tcp::TcpStream;
 
 use self::client::Client;
+use self::listener::Listener;
+
 use loop_::EventLoop;
 use {InputMessage, OutputMessage};
 use {Token, TokenFactory};
 
 mod client;
+mod listener;
 
-pub type Listener = mio::NonBlock<TcpListener>;
+pub use self::client::Statistics as ClientStatistics;
 pub type Stream   = mio::NonBlock<TcpStream>;
 
 #[derive(Debug)]
@@ -173,7 +176,7 @@ impl Handler {
         debug!("listening on {:?}: {:?}", addr, token);
 
         // stuff it in the hash map
-        self.listeners.insert(token, listener);
+        self.listeners.insert(token, Listener::new(listener));
         
         // send response
         match self.downstream.send(OutputMessage::ListenResponse { listener: token }) {
@@ -229,6 +232,22 @@ impl Handler {
             }
         } else {
             warn!("received data request for stale token {:?}", token);
+            Ok(Action::None)
+        }
+    }
+
+    fn proc_stats_request (&mut self, token: Token) -> Result<Action, Error> {
+        if let Some(&(_, ref client)) = self.clients.get(&token) {
+            let stats = client.stats.clone();
+            match self.downstream.send(OutputMessage::StatisticsResponse {
+                token: token,
+                stats: stats,
+            }) {
+                Err(_) => Err(Error::DownstreamDisconnect),
+                Ok(_) => Ok(Action::None),
+            }
+        } else {
+            warn!("received stats request for stale token {:?}", token);
             Ok(Action::None)
         }
     }
@@ -351,8 +370,10 @@ impl Handler {
                     // would block
                     Ok(None) => {},
 
-                    // we got data!
-                    Ok(Some(data)) => {
+                    // we got data! if there's no bytes we don't send a message to the downstream,
+                    // since we'll separately send a client disconnect (a zero length read is
+                    // typically indicative of a hangup, which we check for later)
+                    Ok(Some(data)) => if data.len() > 0 {
                         // kick the packets over to the downstream
                         match self.downstream.send(OutputMessage::Data {
                             token: token,
@@ -467,6 +488,10 @@ impl mio::Handler for Handler {
                 token,
                 data,
             } => (token, self.proc_data(token, data)),
+
+            InputMessage::StatisticsRequest {
+                token,
+            } => (token, self.proc_stats_request(token)),
 
             InputMessage::Close {
                 token,

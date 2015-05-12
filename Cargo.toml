@@ -1,6 +1,9 @@
 [package]
 name = "tcp-loop"
-version = "0.1.0"
+version = "0.1.1"
+description = "a TCP event loop based on mio"
+license = "MIT"
+repository = "https://github.com/calc0000/tcp-loop"
 authors = ["ewf"]
 
 [dependencies]

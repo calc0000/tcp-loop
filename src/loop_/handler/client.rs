@@ -1,5 +1,6 @@
 use mio::{TryRead, TryWrite};
 
+use std::default::Default;
 use std::io;
 use std::net;
 
@@ -10,9 +11,18 @@ pub enum OperationResult {
     WouldBlock,
 }
 
+#[derive(Default, Debug, Clone)]
+pub struct Statistics {
+    pub bytes_read: u64,
+    pub bytes_written_queued: u64,
+    pub bytes_written: u64,
+    pub blocked_writes: u64,
+}
+
 pub struct Client {
-    pub addr:     net::SocketAddr,
-    stream:       Stream,
+    pub addr:  net::SocketAddr,
+    stream:    Stream,
+    pub stats: Statistics,
 
     write_buffer: Vec<u8>,
 }
@@ -22,6 +32,7 @@ impl Client {
         Client {
             addr: addr,
             stream: stream,
+            stats: Default::default(),
             write_buffer: Vec::new(),
         }
     }
@@ -43,6 +54,7 @@ impl Client {
                 break;
             }
 
+            self.stats.bytes_read += read as u64;
             ret.extend(buf[..read].iter().map(|x| *x));
         }
 
@@ -54,14 +66,19 @@ impl Client {
 impl Client {
     pub fn queue_write (&mut self, data: &[u8]) -> Result<(), io::Error> {
         self.write_buffer.extend(data.iter().map(|x| *x));
+        self.stats.bytes_written_queued += data.len() as u64;
         Ok(())
     }
 
     pub fn flush_write (&mut self) -> Result<OperationResult, io::Error> {
         match try!(self.stream.write_slice(&self.write_buffer[..])) {
-            None => Ok(OperationResult::WouldBlock),
+            None => {
+                self.stats.blocked_writes += 1;
+                Ok(OperationResult::WouldBlock)
+            },
             Some(s) => {
                 self.write_buffer = self.write_buffer[s..].to_vec();
+                self.stats.bytes_written += s as u64;
                 Ok(OperationResult::Success(s))
             },
         }

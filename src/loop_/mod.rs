@@ -7,6 +7,7 @@ mod handler;
 use self::handler::Handler;
 use {TokenFactory, InputMessage, OutputMessage};
 
+pub use self::handler::ClientStatistics;
 pub type EventLoop = mio::EventLoop<Handler>;
 
 pub struct Loop {
