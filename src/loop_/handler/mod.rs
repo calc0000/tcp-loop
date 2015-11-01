@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::{convert, io, net};
+use std::{convert, io, marker, net};
 use std::sync::mpsc::Sender;
 use mio;
 use mio::tcp::TcpStream;
@@ -8,7 +8,7 @@ use self::client::Client;
 use self::listener::Listener;
 
 use loop_::EventLoop;
-use {InputMessage, OutputMessage};
+use {Message, InputMessage, OutputMessage};
 use {Token, TokenFactory};
 
 mod client;
@@ -45,7 +45,7 @@ impl convert::From<io::Error> for Error {
     }
 }
 
-fn new_client (clients: &mut HashMap<Token, (bool, Client)>, eloop: &mut EventLoop, token: Token, addr: net::SocketAddr, stream: Stream) -> Result<(), Error> {
+fn new_client<I, O> (clients: &mut HashMap<Token, (bool, Client)>, eloop: &mut EventLoop<I, O>, token: Token, addr: net::SocketAddr, stream: Stream) -> Result<(), Error> where I: Message, O: Message {
     let client = Client::new(addr.clone(), stream);
 
     info!("new client at {:?}", addr);
@@ -70,29 +70,31 @@ fn new_client (clients: &mut HashMap<Token, (bool, Client)>, eloop: &mut EventLo
     Ok(())
 }
 
-pub struct Handler {
+pub struct Handler<I, O> where I: Message, O: Message {
     pending_clients: HashMap<Token, (net::SocketAddr, Stream)>,
     clients:         HashMap<Token, (bool, Client)>,
     listeners:       HashMap<Token, Listener>,
-    downstream:      Sender<OutputMessage>,
+    downstream:      Sender<OutputMessage<O>>,
     factory:         Box<TokenFactory + 'static>,
+    phantom:         marker::PhantomData<*const I>,
 }
 
-impl Handler {
+impl<I, O> Handler<I, O> where I: Message, O: Message {
     pub fn new<F: TokenFactory + 'static> (
         factory:    F,
-        downstream: Sender<OutputMessage>,
-        ) -> Handler {
+        downstream: Sender<OutputMessage<O>>,
+        ) -> Handler<I, O> {
             Handler {
                 pending_clients: HashMap::new(),
                 clients:         HashMap::new(),
                 listeners:       HashMap::new(),
                 downstream:      downstream,
                 factory:         Box::new(factory),
+                phantom:         marker::PhantomData,
             }
         }
 
-    fn try_flush (&mut self, eloop: &mut EventLoop, token: Token) -> Result<Action, Error> {
+    fn try_flush (&mut self, eloop: &mut EventLoop<I, O>, token: Token) -> Result<Action, Error> {
         if let Some(&mut (ref mut waiting_for_write, ref mut client)) = self.clients.get_mut(&token) {
             // try to flush the client
             match client.flush_write() {
@@ -156,7 +158,7 @@ impl Handler {
         }
     }
 
-    fn proc_listen_request (&mut self, eloop: &mut EventLoop, token: Token, addr: net::SocketAddr) -> Result<Action, Error> {
+    fn proc_listen_request (&mut self, eloop: &mut EventLoop<I, O>, token: Token, addr: net::SocketAddr) -> Result<Action, Error> {
         let listener = try!(mio::tcp::listen(&addr));
 
         // register it in the loop
@@ -187,7 +189,7 @@ impl Handler {
         Ok(Action::None)
     }
 
-    fn proc_connect_request (&mut self, eloop: &mut EventLoop, token: Token, addr: net::SocketAddr) -> Result<Action, Error> {
+    fn proc_connect_request (&mut self, eloop: &mut EventLoop<I, O>, token: Token, addr: net::SocketAddr) -> Result<Action, Error> {
         let (stream, waiting) = try!(mio::tcp::connect(&addr));
 
         if waiting {
@@ -252,7 +254,7 @@ impl Handler {
         }
     }
 
-    fn proc_close (&mut self, eloop: &mut EventLoop, token: Token, dirty: bool, reason: Option<io::Error>) -> Result<Action, Error> {
+    fn proc_close (&mut self, eloop: &mut EventLoop<I, O>, token: Token, dirty: bool, reason: Option<io::Error>) -> Result<Action, Error> {
         if self.clients.contains_key(&token) {
             if let Some(&mut (_, ref mut client)) = self.clients.get_mut(&token) {
                 match eloop.deregister(client.as_ref()) {
@@ -278,7 +280,7 @@ impl Handler {
         Ok(Action::None)
     }
 
-    fn deregister_clients (&mut self, eloop: &mut EventLoop) -> Vec<Token> {
+    fn deregister_clients (&mut self, eloop: &mut EventLoop<I, O>) -> Vec<Token> {
         let mut disconnected_clients = Vec::new();
 
         for (&token, &mut (_, ref mut client)) in self.clients.iter_mut() {
@@ -291,7 +293,7 @@ impl Handler {
 
         disconnected_clients
     }
-    fn proc_shutdown (&mut self, eloop: &mut EventLoop) {
+    fn proc_shutdown (&mut self, eloop: &mut EventLoop<I, O>) {
         let disconnected_clients = self.deregister_clients(eloop);
         self.clients.clear();   // the drop should trigger the TCP close sequence
 
@@ -305,7 +307,7 @@ impl Handler {
         eloop.shutdown();
     }
 
-    fn accept (&mut self, eloop: &mut EventLoop, listener_token: Token) -> Result<(), Error> {
+    fn accept (&mut self, eloop: &mut EventLoop<I, O>, listener_token: Token) -> Result<(), Error> {
         if let Some(listener) = self.listeners.get_mut(&listener_token) {
             match listener.accept() {
                 Err(e) => {
@@ -344,7 +346,7 @@ impl Handler {
         }
     }
 
-    fn readable (&mut self, eloop: &mut EventLoop, token: Token, hint: mio::ReadHint) -> Result<Action, Error> {
+    fn readable (&mut self, eloop: &mut EventLoop<I, O>, token: Token, hint: mio::ReadHint) -> Result<Action, Error> {
         if self.listeners.contains_key(&token) {
             match self.accept(eloop, token) {
                 Err(e) => Err(e),
@@ -403,7 +405,7 @@ impl Handler {
         }
     }
 
-    fn writable (&mut self, eloop: &mut EventLoop, token: Token) -> Result<Action, Error> {
+    fn writable (&mut self, eloop: &mut EventLoop<I, O>, token: Token) -> Result<Action, Error> {
         if self.clients.contains_key(&token) {
             if let Some(&mut (ref mut waiting_for_write, _)) = self.clients.get_mut(&token) {
                 if !*waiting_for_write {
@@ -429,7 +431,7 @@ impl Handler {
         }
     }
 
-    fn handle_result (&mut self, eloop: &mut EventLoop, token: Token, res: Result<Action, Error>) {
+    fn handle_result (&mut self, eloop: &mut EventLoop<I, O>, token: Token, res: Result<Action, Error>) {
         match res {
             Err(Error::AcceptFailed) => {}, // do nothing here for now
 
@@ -458,21 +460,21 @@ impl Handler {
     }
 }
 
-impl mio::Handler for Handler {
+impl<I, O> mio::Handler for Handler<I, O> where I: Message, O: Message {
     type Timeout = ();
-    type Message = InputMessage;
+    type Message = InputMessage<I>;
 
-    fn readable (&mut self, eloop: &mut EventLoop, token: Token, hint: mio::ReadHint) {
+    fn readable (&mut self, eloop: &mut EventLoop<I, O>, token: Token, hint: mio::ReadHint) {
         let result = Handler::readable(self, eloop, token, hint);
         self.handle_result(eloop, token, result);
     }
 
-    fn writable (&mut self, eloop: &mut EventLoop, token: Token) {
+    fn writable (&mut self, eloop: &mut EventLoop<I, O>, token: Token) {
         let result = Handler::writable(self, eloop, token);
         self.handle_result(eloop, token, result);
     }
 
-    fn notify (&mut self, eloop: &mut EventLoop, message: InputMessage) {
+    fn notify (&mut self, eloop: &mut EventLoop<I, O>, message: InputMessage<I>) {
         let (token, result) = match message {
             InputMessage::ListenRequest { 
                 listener: token,

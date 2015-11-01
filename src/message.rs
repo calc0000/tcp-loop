@@ -1,10 +1,13 @@
 use ClientStatistics;
 use Token;
 
+use std::fmt::Debug;
 use std::{io, net};
 
+pub trait Message: Debug + Send {}
+
 #[derive(Debug)]
-pub enum Input {
+pub enum Input<T> where T: Message {
     /// request that the loop listen on an address
     ///
     /// If the listen succeeds, an Output::ListenResponse will be sent to
@@ -61,6 +64,9 @@ pub enum Input {
         dirty: bool,
     },
 
+    /// instance specific message
+    User(T),
+
     /// request the loop to shutdown
     ///
     /// The loop will produce Output::Close messages for each client it disconnects as the
@@ -69,7 +75,7 @@ pub enum Input {
 }
 
 #[derive(Debug)]
-pub enum Output {
+pub enum Output<T> where T: Message {
     /// indicate that a listener has been established
     ///
     /// This message is sent in response to an Input::ListenRequest that succeeds.
@@ -140,6 +146,9 @@ pub enum Output {
         /// the token associated with the connection or listener that has closed
         token:  Token,
     },
+
+    /// instance specific message
+    User(T),
 
     /// notify the downstream that a connection ended uncleanly
     ///
